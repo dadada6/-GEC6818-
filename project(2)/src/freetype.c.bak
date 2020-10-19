@@ -1,0 +1,196 @@
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <string.h>
+#include <linux/fb.h>
+#include <math.h>
+#include <wchar.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_GLYPH_H
+
+unsigned char *fbmem;
+
+struct fb_var_screeninfo fb_var;
+struct fb_fix_screeninfo fb_fix;
+
+unsigned int screensize;
+int x = 0;
+
+
+/*rgb565*/
+void pixel_show(int x, int y, unsigned int color)
+{
+  unsigned int red, green, blue;
+  switch (fb_var.bits_per_pixel) //rgb   像素
+  {
+  case 32:
+  {
+    unsigned int *addr = (unsigned int *)fbmem + (fb_var.xres * y + x);
+    // if(color==208){
+    //   *addr=0;
+    // }
+    // else{
+      *addr = color;
+    // }
+    // *addr = color;
+    printf("%d\n",color);
+    break;
+  }
+  case 24:
+  {
+    unsigned int *addr = (unsigned int *)fbmem + (fb_var.xres * y + x);
+    *addr = color;
+    break;
+  }
+  case 16: //将RGB888 转为RGB565
+  {
+    unsigned short *addr = (unsigned short *)fbmem + (fb_var.xres * y + x);
+    if (color != 0)
+    {
+      red = (color >> 16) & 0xff;
+      green = (color >> 8) & 0xff;
+      blue = (color >> 0) & 0xff;
+      color = ((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3);
+    }
+
+    *addr = color;
+    break;
+  }
+  case 8:
+  {
+    unsigned char *addr = (unsigned char *)fbmem + (fb_var.xres * y + x);
+    *addr = (unsigned char)color;
+    break;
+  }
+
+  default:
+  {
+    printf("can't  surport %dbpp \n", fb_var.bits_per_pixel);
+    break;
+  }
+  }
+}
+
+void draw_bitmap(FT_Bitmap *bitmap,
+                 FT_Int x,
+                 FT_Int y)
+{
+  FT_Int i, j, p, q;
+  FT_Int x_max = x + bitmap->width; //x:当前X位置， bitmap->width:该字宽度
+  FT_Int y_max = y + bitmap->rows;
+
+  for (i = x, p = 0; i < x_max; i++, p++) //i:lcd的x轴
+  {
+    for (j = y, q = 0; j < y_max; j++, q++) //j:lcd的y轴
+    {
+      if (i < 0 || j < 0 ||
+          i >= fb_var.xres || j >= fb_var.yres)
+        continue;
+      pixel_show(i, j, bitmap->buffer[q * bitmap->width + p]);
+    }
+  }
+}
+
+void lcd_vector_show(char *argv, wchar_t *str)
+{
+  FT_Library library;
+  FT_Face face;
+  FT_GlyphSlot slot;
+  FT_Vector pen; /* untransformed origin  */
+  unsigned char error;
+  unsigned char n, font_size;
+
+  /* initialize library */
+  if (FT_Init_FreeType(&library))
+  {
+    printf("FT_Init_FreeType ERROR\n");
+    return;
+  }
+
+  /* create face object */
+  if (FT_New_Face(library, argv, 0, &face))
+  {
+    printf("FT_New_Face ERROR\n");
+    return;
+  }
+
+  slot = face->glyph;
+
+  /*显示坐标(从LCD中间显示)
+      *x=fb_var.xres /2
+      *y=fb_var.yres-fb_var.yres/2-16   (减16,是因为笛卡尔坐标以左下方开始计算坐标值的)
+  */
+  //  pen.x = fb_var.xres /2* 64;
+  //  pen.y = ( fb_var.yres/2-16) * 64;
+  pen.x = x;
+  pen.y = 500;
+
+  for (n = 0; n < wcslen(str); n++)
+  {
+    // font_size=(n%6)*4+20;            // 20*20  24*24  28*28  32*32  36*36 40*40
+    font_size = 36;
+    FT_Set_Pixel_Sizes(face, 0, font_size); /* set character size */
+    FT_Set_Transform(face, 0, &pen);
+    if (FT_Load_Char(face, str[n], FT_LOAD_RENDER))
+    {
+      printf("FT_Load_Char ERROR\n");
+      continue;
+    }
+    draw_bitmap(&slot->bitmap, slot->bitmap_left, fb_var.yres - slot->bitmap_top);
+    pen.x += slot->advance.x;
+    pen.y += slot->advance.y;
+  }
+  FT_Done_Face(face);
+  FT_Done_FreeType(library);
+}
+
+int main(int argc, char* argv[])
+{
+  int fd_fb;
+  wchar_t *chinese_str = L"广州商学院物联网工程";
+  if (argc != 2)
+  {
+    printf("usage: %s  font_file \n", argv[0]);
+    return 0;
+  }
+  fd_fb = open("/dev/fb0", O_RDWR);
+  if (fd_fb < 0)
+  {
+    printf("can't open /dev/fb0 \n");
+    return 0;
+  }
+  if (ioctl(fd_fb, FBIOGET_VSCREENINFO, &fb_var) < 0)
+  {
+    printf("can't get var \n");
+    return 0;
+  }
+  if (ioctl(fd_fb, FBIOGET_FSCREENINFO, &fb_fix) < 0)
+  {
+    printf("can't get fix \n");
+    return 0;
+  }
+  screensize = fb_var.xres * fb_var.yres * (fb_var.bits_per_pixel / 8); //显存大小
+
+  fbmem = (unsigned char *)mmap(NULL, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fd_fb, 0); //映射fb0
+  if (!fbmem)
+  {
+    printf("can't map /dev/fb0 \n");
+    return 0;
+  };
+  // memset(fbmem, 0x0, screensize); //清屏黑色
+  while(1){
+    lcd_vector_show(*(argv+1), chinese_str);
+    x=x+10000;
+    if(x>50000){
+      x=0;
+    }
+  }
+  
+  munmap(fbmem, screensize);
+  return 0;
+}
